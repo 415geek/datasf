@@ -34,7 +34,6 @@ st.markdown(
 
 st.caption("📊 Real-time data from DataSF")
 
-
 # -------------------- Socrata config --------------------
 SOC_DOMAIN = st.secrets.get("socrata", {}).get("domain", "data.sfgov.org")
 DATASET_ID = st.secrets.get("socrata", {}).get("dataset_id", "g8m3-pdis")
@@ -216,6 +215,10 @@ NEIGHBORHOOD_EMOJI = {
 }
 
 
+def emoji_for(name: str) -> str:
+    return NEIGHBORHOOD_EMOJI.get(name, "📍")
+
+
 # -------------------- Date ranges --------------------
 today = date.today()
 start_of_week = today - timedelta(days=today.weekday())
@@ -245,7 +248,7 @@ k3.metric("🏢 New This Month", month_c)
 st.markdown("### Explore by Period, Industry, and Neighborhood")
 period_choice = st.radio("Time period", ["Today", "This Week", "This Month", "Custom"], index=0, horizontal=True)
 
-# --- Safe custom date input handling ---
+# --- Safe date input ---
 if period_choice == "Today":
     df_period = superset_df[superset_df["start_date"] == today]
     period_label = today.strftime("%b %d, %Y")
@@ -274,21 +277,31 @@ if df_period.empty:
     st.info("No business registrations found for the selected period.")
     st.stop()
 
-# -------------------- Charts --------------------
+# -------------------- Industry Chart --------------------
 st.markdown("#### 🏭 New Businesses by Industry")
 industry_counts = df_period["naic_code_description"].value_counts(ascending=True)
 fig_industry = render_hbar(industry_counts, f"New Businesses by Industry ({period_label})")
 
-# Add emoji to neighborhood labels
-df_period["neighborhoods_with_emoji"] = df_period["neighborhoods_analysis_boundaries"].apply(
-    lambda n: f"{NEIGHBORHOOD_EMOJI.get(n, '📍')} {n}"
-)
-
+# -------------------- Neighborhood Chart + Emoji-safe Labels --------------------
 st.markdown("#### 🗺️ New Businesses by Neighborhood")
-neigh_counts = df_period["neighborhoods_with_emoji"].value_counts(ascending=True)
+
+df_period["neighborhood_label_table"] = df_period["neighborhoods_analysis_boundaries"].apply(
+    lambda n: f"{emoji_for(n)} {n}"
+)
+df_period["neighborhood_label_chart"] = df_period["neighborhoods_analysis_boundaries"]
+
+neigh_counts = df_period["neighborhood_label_chart"].value_counts(ascending=True)
 fig_neigh = render_hbar(neigh_counts, f"New Businesses by Neighborhood ({period_label})")
 
-# -------------------- View Details by Industry --------------------
+neigh_counts_table = (
+    df_period["neighborhood_label_table"]
+    .value_counts(ascending=False)
+    .rename_axis("Neighborhood")
+    .reset_index(name="Count")
+)
+st.dataframe(neigh_counts_table, use_container_width=True)
+
+# -------------------- Details by Industry --------------------
 st.markdown("### 🔍 View Details by Industry")
 industry_options = list(industry_counts.index[::-1])
 sel_industry = st.selectbox("Pick an industry to list all new registrations", options=industry_options, index=0)
@@ -317,6 +330,8 @@ pick_col(detail_df, ["business_zip", "source_zipcode", "zip_code"], "ZIP")
 pick_col(detail_df, ["neighborhoods_analysis_boundaries"], "Neighborhood")
 pick_col(detail_df, ["business_corridor"], "Business Corridor")
 pick_col(detail_df, ["business_location"], "Business Location (Geo)")
+
+detail_df["Neighborhood"] = detail_df["Neighborhood"].apply(lambda n: f"{emoji_for(n)} {n}" if pd.notna(n) else n)
 
 display_cols = [
     "Start Date",
@@ -348,18 +363,7 @@ st.download_button(
     mime="text/csv",
 )
 
-# -------------------- Optional tables --------------------
-with st.expander("📋 Show underlying count tables"):
-    st.write("Industry counts")
-    st.dataframe(
-        industry_counts.sort_values(ascending=False).rename_axis("Industry").reset_index(name="Count")
-    )
-    st.write("Neighborhood counts")
-    st.dataframe(
-        neigh_counts.sort_values(ascending=False).rename_axis("Neighborhood").reset_index(name="Count")
-    )
-
-# -------------------- PDF download --------------------
+# -------------------- PDF Export --------------------
 fig_industry_path = "industry_chart.png"
 fig_neigh_path = "neighborhood_chart.png"
 fig_industry.savefig(fig_industry_path, bbox_inches="tight")
