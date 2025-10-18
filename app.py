@@ -11,8 +11,8 @@ from fpdf import FPDF
 
 
 # -------------------- Page config --------------------
-st.set_page_config(page_title="SF Business Registrations Dashboard", layout="wide")
-st.title("San Francisco Business Registrations Dashboard")
+st.set_page_config(page_title="SF Business Registrations Dashboard(LIVE)", layout="wide")
+st.title("San Francisco Business Registrations Dashboard(LIVE)")
 st.caption("Real-time insights from DataSF · Registered Business Locations (g8m3-pdis)")
 
 
@@ -47,36 +47,50 @@ def _with_app_token(params: dict) -> dict:
 
 def socrata_get(params: dict, timeout=45, max_retries=3):
     """
-    GET wrapper with retries, rate-limit backoff and human-readable diagnostics.
-    Raises on failure after retries.
+    GET wrapper with retries, rate-limit backoff, diagnostics, and
+    auto-fallback when the server says 'Invalid app_token specified'.
     """
+    global HEADERS  # we may mutate to temporarily drop token
     params = _with_app_token(params)
     last_err = None
+    used_token_this_call = "$$app_token" in params or ("X-App-Token" in HEADERS)
+
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.get(
                 BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout
             )
-            # Handle rate limiting
+
+            # Rate limiting
             if resp.status_code == 429:
                 wait = 2 ** attempt
                 st.warning(f"Socrata rate limited (HTTP 429). Retrying in {wait}s …")
                 time.sleep(wait)
                 continue
 
-            # Non-OK -> show snippet and raise
+            # Handle invalid app_token -> one-time retry WITHOUT token
+            if resp.status_code == 403 and "Invalid app_token" in (resp.text or "") and used_token_this_call:
+                st.warning("Server says app_token is invalid. Retrying without token …")
+                saved_headers = HEADERS.copy()
+                HEADERS = {k: v for k, v in HEADERS.items() if k.lower() != "x-app-token"}
+                params.pop("$%24app_token", None)  # URL-encoded key defensive remove
+                params.pop("$$app_token", None)
+                used_token_this_call = False
+                resp = requests.get(
+                    BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout
+                )
+
             if not resp.ok:
                 snippet = (resp.text or "")[:300].replace("\n", " ")
                 st.error(f"Socrata HTTP {resp.status_code} · snippet: {snippet}")
                 resp.raise_for_status()
 
             return resp
+
         except requests.RequestException as e:
             last_err = e
-            # small linear/exponential backoff
             time.sleep(1.5 * attempt)
 
-    # After retries, bubble up the last error
     raise last_err
 
 
@@ -91,6 +105,40 @@ def ping_socrata():
         st.sidebar.exception(e)
 
 
+# === NEW: detail columns we want to show in the “click industry to view details” table ===
+DETAIL_COLS = [
+    # IDs & timing
+    "ttxid",
+    "location_start_date",
+    # names
+    "dba_name",                # Doing Business As
+    "ownership_name",
+    "business_account_number",
+    # classification
+    "naics_code",
+    "naic_code_description",
+    # location & geo buckets
+    "street_address",
+    "city",
+    "state",
+    "source_zipcode",          # dataset uses source_zipcode
+    "neighborhoods_analysis_boundaries",
+    "business_corridor",
+    # freeform location (often contains lat/lon JSON)
+    "business_location"
+]
+
+# Minimal set needed for KPIs & charts (must include all used later)
+BASIC_COLS = [
+    "ttxid",
+    "location_start_date",
+    "naic_code_description",
+    "neighborhoods_analysis_boundaries"
+]
+
+SELECT_COLS = list(dict.fromkeys(BASIC_COLS + DETAIL_COLS))  # preserve order, no dups
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
     """
@@ -102,27 +150,21 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
         f"location_start_date < '{_dt_iso(end_exclusive_d)}'"
     )
 
-    select_cols = [
-        "ttxid",
-        "location_start_date",
-        "naic_code_description",
-        "neighborhoods_analysis_boundaries",
-    ]
-
     # 1) Count first (fast)
     params_count = {"$select": "count(ttxid)", "$where": where}
     r = socrata_get(params_count, timeout=30)
     j = r.json()
     total = int(j[0].get("count_ttxid", 0)) if j else 0
     if total == 0:
-        return pd.DataFrame(columns=select_cols + ["start_date"])
+        df_empty = pd.DataFrame(columns=SELECT_COLS + ["start_date"])
+        return df_empty
 
     # 2) Page through
     all_rows = []
     limit = 1000
     for offset in range(0, total, limit):
         params = {
-            "$select": ", ".join(select_cols),
+            "$select": ", ".join(SELECT_COLS),
             "$where": where,
             "$order": "location_start_date",
             "$limit": min(limit, total - offset),
@@ -136,11 +178,12 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
         return df
 
     # Normalize fields
-    if "naic_code_description" not in df.columns:
-        df["naic_code_description"] = np.nan
-    if "neighborhoods_analysis_boundaries" not in df.columns:
-        df["neighborhoods_analysis_boundaries"] = np.nan
+    # ensure columns exist
+    for col in SELECT_COLS:
+        if col not in df.columns:
+            df[col] = np.nan
 
+    # Friendly fill
     df["naic_code_description"] = df["naic_code_description"].fillna("Unknown")
     df["neighborhoods_analysis_boundaries"] = df["neighborhoods_analysis_boundaries"].fillna(
         "Outside San Francisco"
@@ -275,8 +318,53 @@ st.markdown("#### New Businesses by Neighborhood")
 neigh_counts = df_period["neighborhoods_analysis_boundaries"].value_counts(ascending=True)
 fig_neigh = render_hbar(neigh_counts, f"New Businesses by Neighborhood ({period_label})")
 
-# Optional tables
-with st.expander("Show underlying tables"):
+# -------------------- NEW: “click industry to view details” UX --------------------
+st.markdown("### View Details by Industry")
+# Provide an easy-to-click selector containing exactly the labels shown in the chart
+industry_options = list(industry_counts.index[::-1])  # highest first
+sel_industry = st.selectbox("Pick an industry to list all new registrations", options=industry_options, index=0)
+
+# Filter details
+detail_df = df_period[df_period["naic_code_description"] == sel_industry].copy()
+
+# Reorder & pretty columns for display
+pretty_cols = [
+    ("location_start_date", "Start Date"),
+    ("dba_name", "DBA Name"),
+    ("ownership_name", "Owner/Legal Name"),
+    ("business_account_number", "Business Account #"),
+    ("naics_code", "NAICS Code"),
+    ("naic_code_description", "NAICS Description"),
+    ("street_address", "Street"),
+    ("city", "City"),
+    ("state", "State"),
+    ("source_zipcode", "ZIP"),
+    ("neighborhoods_analysis_boundaries", "Neighborhood"),
+    ("business_corridor", "Business Corridor"),
+    ("business_location", "Business Location (Geo)"),
+    ("ttxid", "TTXID"),
+]
+
+for col, _ in pretty_cols:
+    if col not in detail_df.columns:
+        detail_df[col] = np.nan
+
+detail_df = detail_df[[c for c, _ in pretty_cols]].rename(columns=dict(pretty_cols))
+
+st.write(f"**{sel_industry}** — {len(detail_df)} new registrations in the selected period")
+st.dataframe(detail_df, use_container_width=True)
+
+# CSV download for this industry
+csv_bytes = detail_df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "Download CSV (Selected Industry Details)",
+    data=csv_bytes,
+    file_name=f"{sel_industry.replace(' ', '_')}_Details_{period_choice.replace(' ', '_')}.csv",
+    mime="text/csv",
+)
+
+# -------------------- Optional tables (global counts) --------------------
+with st.expander("Show underlying count tables"):
     st.write("Industry counts")
     st.dataframe(
         industry_counts.sort_values(ascending=False).rename_axis("Industry").reset_index(name="Count")
@@ -286,7 +374,7 @@ with st.expander("Show underlying tables"):
         neigh_counts.sort_values(ascending=False).rename_axis("Neighborhood").reset_index(name="Count")
     )
 
-# -------------------- PDF download --------------------
+# -------------------- PDF download (KPIs + both charts) --------------------
 fig_industry_path = "industry_chart.png"
 fig_neigh_path = "neighborhood_chart.png"
 fig_industry.savefig(fig_industry_path, bbox_inches="tight")
@@ -294,7 +382,7 @@ fig_neigh.savefig(fig_neigh_path, bbox_inches="tight")
 
 pdf_bytes = make_pdf(period_label, today_c, week_c, month_c, fig_industry_path, fig_neigh_path)
 st.download_button(
-    "Download PDF",
+    "Download PDF (Charts & KPIs)",
     data=pdf_bytes,
     file_name=f"SF_Business_Registrations_{period_choice.replace(' ', '_')}.pdf",
     mime="application/pdf",
