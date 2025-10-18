@@ -45,17 +45,14 @@ BASE_URL = f"https://{SOC_DOMAIN}/resource/{DATASET_ID}.json"
 HEADERS = {"X-App-Token": APP_TOKEN} if APP_TOKEN else {}
 AUTH = (USERNAME, PASSWORD) if USERNAME and PASSWORD else None
 
-
 # -------------------- HELPERS --------------------
 def _dt_iso(d: date) -> str:
     return f"{d.isoformat()}T00:00:00.000"
-
 
 def _with_app_token(params: dict) -> dict:
     if APP_TOKEN and "$$app_token" not in params:
         params = {**params, "$$app_token": APP_TOKEN}
     return params
-
 
 def socrata_get(params: dict, timeout=45, max_retries=3):
     """Retry-safe Socrata fetch."""
@@ -93,14 +90,12 @@ def socrata_get(params: dict, timeout=45, max_retries=3):
             time.sleep(1.5 * attempt)
     raise last_err
 
-
 BASIC_COLS = [
     "ttxid",
     "location_start_date",
     "naic_code_description",
     "neighborhoods_analysis_boundaries",
 ]
-
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
@@ -145,7 +140,6 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
     df["start_date"] = pd.to_datetime(df.get("location_start_date"), errors="coerce").dt.date
     return df
 
-
 def counts_block(df, today, sow, eow, som, eom):
     if df.empty:
         return 0, 0, 0
@@ -154,7 +148,6 @@ def counts_block(df, today, sow, eow, som, eom):
         int(((df["start_date"] >= sow) & (df["start_date"] < eow)).sum()),
         int(((df["start_date"] >= som) & (df["start_date"] < eom)).sum()),
     )
-
 
 def render_hbar(counts: pd.Series, title: str):
     fig = plt.figure(figsize=(8, max(4, 0.3 * len(counts))))
@@ -169,9 +162,8 @@ def render_hbar(counts: pd.Series, title: str):
     st.pyplot(fig)
     return fig
 
-
-# --- FIXED PDF EXPORT (version-safe encoding) ---
-def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
+# --- PDF EXPORT (version-safe encoding) ---
+def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path) -> bytes:
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
@@ -194,8 +186,16 @@ def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
     pdf.image(fig2_path, x=10, w=185)
 
     out = pdf.output(dest="S")
-    return out.encode("latin-1") if isinstance(out, str) else out
-
+    if isinstance(out, bytes):
+        return out
+    if isinstance(out, bytearray):
+        return bytes(out)
+    if isinstance(out, memoryview):
+        return out.tobytes()
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    # last resort
+    return bytes(str(out), "latin-1", "replace")
 
 # -------------------- NEIGHBORHOOD EMOJI --------------------
 NEIGHBORHOOD_EMOJI = {
@@ -215,11 +215,8 @@ NEIGHBORHOOD_EMOJI = {
     "Bayview Hunters Point": "⚙️",
     "Excelsior": "🛍️",
 }
-
-
 def emoji_for(name: str) -> str:
     return NEIGHBORHOOD_EMOJI.get(name, "📍")
-
 
 # -------------------- DATE RANGE --------------------
 today = date.today()
@@ -286,7 +283,6 @@ fig_industry = render_hbar(industry_counts, f"New Businesses by Industry ({perio
 
 # -------------------- NEIGHBORHOOD CHART + EMOJI --------------------
 st.markdown("#### 🗺️ New Businesses by Neighborhood")
-
 df_period["neighborhood_label_table"] = df_period["neighborhoods_analysis_boundaries"].apply(
     lambda n: f"{emoji_for(n)} {n}"
 )
@@ -309,14 +305,12 @@ industry_options = list(industry_counts.index[::-1])
 sel_industry = st.selectbox("Pick an industry to list all new registrations", options=industry_options, index=0)
 detail_df = df_period[df_period["naic_code_description"] == sel_industry].copy()
 
-
 def pick_col(df, candidates, new_name):
     for c in candidates:
         if c in df.columns:
             df[new_name] = df[c]
             return
     df[new_name] = np.nan
-
 
 pick_col(detail_df, ["location_start_date"], "Start Date")
 pick_col(detail_df, ["dba_name"], "DBA Name")
@@ -371,12 +365,21 @@ fig_neigh_path = "neighborhood_chart.png"
 fig_industry.savefig(fig_industry_path, bbox_inches="tight")
 fig_neigh.savefig(fig_neigh_path, bbox_inches="tight")
 
-pdf_bytes = make_pdf(period_label, today_c, week_c, month_c, fig_industry_path, fig_neigh_path)
-st.download_button(
-    "📄 Download PDF (Charts & KPIs)",
-    data=pdf_bytes,
-    file_name=f"SF_Business_Registrations_{period_choice.replace(' ', '_')}.pdf",
-    mime="application/pdf",
-)
+try:
+    pdf_bytes = make_pdf(period_label, today_c, week_c, month_c, fig_industry_path, fig_neigh_path)
+    # Double-safety: enforce bytes
+    if not isinstance(pdf_bytes, (bytes, bytearray, memoryview)):
+        pdf_bytes = bytes(str(pdf_bytes), "latin-1", "replace")
+    else:
+        pdf_bytes = bytes(pdf_bytes)
+    st.download_button(
+        "📄 Download PDF (Charts & KPIs)",
+        data=pdf_bytes,
+        file_name=f"SF_Business_Registrations_{period_choice.replace(' ', '_')}.pdf",
+        mime="application/pdf",
+    )
+except Exception as e:
+    st.warning("PDF generation failed; please try again or change the selected period.")
+    st.exception(e)
 
 st.caption("Data source: Registered Business Locations – San Francisco (g8m3-pdis) • Powered by Socrata SODA API")
