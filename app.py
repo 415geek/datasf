@@ -9,7 +9,6 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 
-
 # -------------------- Page config --------------------
 st.set_page_config(page_title="SF Business Registrations Dashboard", layout="wide")
 st.title("San Francisco Business Registrations Dashboard")
@@ -33,10 +32,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption("Real-time data from DataSF ")
+st.caption("📊 Real-time data from DataSF")
 
 
-# -------------------- Secrets / Socrata config --------------------
+# -------------------- Socrata config --------------------
 SOC_DOMAIN = st.secrets.get("socrata", {}).get("domain", "data.sfgov.org")
 DATASET_ID = st.secrets.get("socrata", {}).get("dataset_id", "g8m3-pdis")
 APP_TOKEN = st.secrets.get("socrata", {}).get("app_token", None)
@@ -44,12 +43,8 @@ USERNAME = st.secrets.get("socrata", {}).get("username", None)
 PASSWORD = st.secrets.get("socrata", {}).get("password", None)
 
 BASE_URL = f"https://{SOC_DOMAIN}/resource/{DATASET_ID}.json"
-
-HEADERS = {}
-if APP_TOKEN:
-    HEADERS["X-App-Token"] = APP_TOKEN
-
-AUTH = (USERNAME, PASSWORD) if (USERNAME and PASSWORD) else None
+HEADERS = {"X-App-Token": APP_TOKEN} if APP_TOKEN else {}
+AUTH = (USERNAME, PASSWORD) if USERNAME and PASSWORD else None
 
 
 # -------------------- Helper utilities --------------------
@@ -68,40 +63,35 @@ def socrata_get(params: dict, timeout=45, max_retries=3):
     global HEADERS
     params = _with_app_token(params)
     last_err = None
-    used_token_this_call = "$$app_token" in params or ("X-App-Token" in HEADERS)
+    used_token = "$$app_token" in params or ("X-App-Token" in HEADERS)
 
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.get(
-                BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout
-            )
+            resp = requests.get(BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout)
 
             if resp.status_code == 429:
                 wait = 2 ** attempt
-                st.warning(f"Socrata rate limited (HTTP 429). Retrying in {wait}s …")
+                st.warning(f"⏳ Rate limited (HTTP 429). Retrying in {wait}s …")
                 time.sleep(wait)
                 continue
 
-            if resp.status_code == 403 and "Invalid app_token" in (resp.text or "") and used_token_this_call:
-                st.warning("Invalid app_token. Retrying without token …")
+            if resp.status_code == 403 and "Invalid app_token" in (resp.text or "") and used_token:
+                st.warning("⚠️ Invalid app_token. Retrying without token …")
                 HEADERS = {k: v for k, v in HEADERS.items() if k.lower() != "x-app-token"}
                 params.pop("$%24app_token", None)
                 params.pop("$$app_token", None)
-                used_token_this_call = False
-                resp = requests.get(
-                    BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout
-                )
+                used_token = False
+                resp = requests.get(BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout)
 
             if not resp.ok:
                 snippet = (resp.text or "")[:250].replace("\n", " ")
-                st.error(f"Socrata HTTP {resp.status_code} · snippet: {snippet}")
+                st.error(f"🚫 HTTP {resp.status_code} · {snippet}")
                 resp.raise_for_status()
 
             return resp
         except requests.RequestException as e:
             last_err = e
             time.sleep(1.5 * attempt)
-
     raise last_err
 
 
@@ -158,13 +148,14 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
     return df
 
 
-def counts_block(df: pd.DataFrame, today: date, sow: date, eow: date, som: date, eom: date):
+def counts_block(df, today, sow, eow, som, eom):
     if df.empty:
         return 0, 0, 0
-    today_c = int((df["start_date"] == today).sum())
-    week_c = int(((df["start_date"] >= sow) & (df["start_date"] < eow)).sum())
-    month_c = int(((df["start_date"] >= som) & (df["start_date"] < eom)).sum())
-    return today_c, week_c, month_c
+    return (
+        int((df["start_date"] == today).sum()),
+        int(((df["start_date"] >= sow) & (df["start_date"] < eow)).sum()),
+        int(((df["start_date"] >= som) & (df["start_date"] < eom)).sum()),
+    )
 
 
 def render_hbar(counts: pd.Series, title: str):
@@ -188,7 +179,6 @@ def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
     pdf.cell(0, 10, "SF Business Registrations Report", ln=1, align="C")
     pdf.set_font("Helvetica", "", 12)
 
-    # --- sanitize unicode dashes ---
     period_label = period_label.replace("–", "-").replace("—", "-")
 
     pdf.cell(0, 8, f"Period: {period_label}", ln=1)
@@ -204,6 +194,26 @@ def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
     pdf.cell(0, 8, "By Neighborhood", ln=1)
     pdf.image(fig2_path, x=10, w=185)
     return pdf.output(dest="S").encode("latin-1")
+
+
+# -------------------- Neighborhood Emoji Map --------------------
+NEIGHBORHOOD_EMOJI = {
+    "Chinatown": "🐉",
+    "Financial District/South Beach": "🏙️",
+    "Mission": "🎨",
+    "Sunset/Parkside": "🌅",
+    "Richmond": "🌉",
+    "North Beach": "🍝",
+    "SoMa": "💼",
+    "Downtown/Civic Center": "🏛️",
+    "Outer Mission": "🏠",
+    "Castro/Upper Market": "🏳️‍🌈",
+    "Haight Ashbury": "🎸",
+    "Marina": "⛵",
+    "Presidio": "🌲",
+    "Bayview Hunters Point": "⚙️",
+    "Excelsior": "🛍️",
+}
 
 
 # -------------------- Date ranges --------------------
@@ -226,14 +236,16 @@ with st.spinner("Fetching live data from Socrata..."):
 today_c, week_c, month_c = counts_block(
     superset_df, today, start_of_week, start_of_next_week, start_of_month, start_of_next_month
 )
+
 k1, k2, k3 = st.columns(3)
-k1.metric("New Businesses Today", today_c)
-k2.metric("New This Week", week_c)
-k3.metric("New This Month", month_c)
+k1.metric("📅 New Businesses Today", today_c)
+k2.metric("📈 New This Week", week_c)
+k3.metric("🏢 New This Month", month_c)
 
 st.markdown("### Explore by Period, Industry, and Neighborhood")
 period_choice = st.radio("Time period", ["Today", "This Week", "This Month", "Custom"], index=0, horizontal=True)
 
+# --- Safe custom date input handling ---
 if period_choice == "Today":
     df_period = superset_df[superset_df["start_date"] == today]
     period_label = today.strftime("%b %d, %Y")
@@ -248,9 +260,11 @@ elif period_choice == "This Month":
 else:
     default_start = today - timedelta(days=7)
     default_end = today
-    start_d, end_d = st.date_input("Select date range", value=(default_start, default_end))
-    if isinstance(start_d, tuple):
-        start_d, end_d = start_d
+    date_range = st.date_input("Select date range", value=(default_start, default_end))
+    if not (isinstance(date_range, tuple) and len(date_range) == 2):
+        st.info("📆 Please select both a start and end date to display data.")
+        st.stop()
+    start_d, end_d = date_range
     end_exclusive = end_d + timedelta(days=1)
     with st.spinner("Fetching custom range..."):
         df_period = fetch_range(start_d, end_exclusive)
@@ -261,16 +275,21 @@ if df_period.empty:
     st.stop()
 
 # -------------------- Charts --------------------
-st.markdown("#### New Businesses by Industry")
+st.markdown("#### 🏭 New Businesses by Industry")
 industry_counts = df_period["naic_code_description"].value_counts(ascending=True)
 fig_industry = render_hbar(industry_counts, f"New Businesses by Industry ({period_label})")
 
-st.markdown("#### New Businesses by Neighborhood")
-neigh_counts = df_period["neighborhoods_analysis_boundaries"].value_counts(ascending=True)
+# Add emoji to neighborhood labels
+df_period["neighborhoods_with_emoji"] = df_period["neighborhoods_analysis_boundaries"].apply(
+    lambda n: f"{NEIGHBORHOOD_EMOJI.get(n, '📍')} {n}"
+)
+
+st.markdown("#### 🗺️ New Businesses by Neighborhood")
+neigh_counts = df_period["neighborhoods_with_emoji"].value_counts(ascending=True)
 fig_neigh = render_hbar(neigh_counts, f"New Businesses by Neighborhood ({period_label})")
 
 # -------------------- View Details by Industry --------------------
-st.markdown("### View Details by Industry")
+st.markdown("### 🔍 View Details by Industry")
 industry_options = list(industry_counts.index[::-1])
 sel_industry = st.selectbox("Pick an industry to list all new registrations", options=industry_options, index=0)
 detail_df = df_period[df_period["naic_code_description"] == sel_industry].copy()
@@ -323,14 +342,14 @@ st.dataframe(detail_df, use_container_width=True)
 
 csv_bytes = detail_df.to_csv(index=False).encode("utf-8")
 st.download_button(
-    "Download CSV (Selected Industry Details)",
+    "💾 Download CSV (Selected Industry Details)",
     data=csv_bytes,
     file_name=f"{sel_industry.replace(' ', '_')}_Details_{period_choice.replace(' ', '_')}.csv",
     mime="text/csv",
 )
 
 # -------------------- Optional tables --------------------
-with st.expander("Show underlying count tables"):
+with st.expander("📋 Show underlying count tables"):
     st.write("Industry counts")
     st.dataframe(
         industry_counts.sort_values(ascending=False).rename_axis("Industry").reset_index(name="Count")
@@ -348,7 +367,7 @@ fig_neigh.savefig(fig_neigh_path, bbox_inches="tight")
 
 pdf_bytes = make_pdf(period_label, today_c, week_c, month_c, fig_industry_path, fig_neigh_path)
 st.download_button(
-    "Download PDF (Charts & KPIs)",
+    "📄 Download PDF (Charts & KPIs)",
     data=pdf_bytes,
     file_name=f"SF_Business_Registrations_{period_choice.replace(' ', '_')}.pdf",
     mime="application/pdf",
