@@ -33,7 +33,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption("Real-time insights from DataSF · Registered Business Locations (g8m3-pdis)")
+st.caption("Real-time data pull from DataSF")
 
 
 # -------------------- Secrets / Socrata config --------------------
