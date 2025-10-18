@@ -20,7 +20,7 @@ st.markdown(
     f"""
 <div style="display:flex;align-items:center;gap:10px;margin-top:-6px;margin-bottom:8px;">
   <div style="font-size:14px;color:#666;">
-    Built by <strong>Maxwell Lai</strong>
+    Builded by <strong>Maxwell Lai</strong>
   </div>
   <a href="{LINKEDIN_URL}" target="_blank" title="LinkedIn: Maxwell Lai"
      style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
@@ -33,7 +33,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption("Real-time insights from DataSF · Registered Business Locations (g8m3-pdis)")
+st.caption("Real-time data from DataSF ")
 
 
 # -------------------- Secrets / Socrata config --------------------
