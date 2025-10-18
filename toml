@@ -1,0 +1,13 @@
+[socrata]
+# For DataSF:
+domain = "data.sfgov.org"
+dataset_id = "g8m3-pdis"
+
+# Use *one* of the following auth methods:
+
+# A) App Token only (most queries够用)
+app_token = "YOUR_APP_TOKEN_HERE"
+
+# B) (Optional) App Token + basic auth (username/password) if你需要更高速率限额
+# username = "your_email_or_username"
+# password = "your_password"
