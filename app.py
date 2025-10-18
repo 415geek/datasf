@@ -12,7 +12,7 @@ from fpdf import FPDF
 
 # -------------------- Page config --------------------
 st.set_page_config(page_title="SF Business Registrations Dashboard", layout="wide")
-st.title("San Francisco Business Registrations Dashboard(LIVE)")
+st.title("San Francisco Business Registrations Dashboard")
 
 # --- Builder credit with LinkedIn button (under title) ---
 LINKEDIN_URL = "https://www.linkedin.com/in/lingyu-maxwell-lai"
@@ -20,7 +20,7 @@ st.markdown(
     f"""
 <div style="display:flex;align-items:center;gap:10px;margin-top:-6px;margin-bottom:8px;">
   <div style="font-size:14px;color:#666;">
-    Builded by <strong>Maxwell Lai</strong>
+    Built by <strong>Maxwell Lai</strong>
   </div>
   <a href="{LINKEDIN_URL}" target="_blank" title="LinkedIn: Maxwell Lai"
      style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
@@ -33,15 +33,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption("Real-time data pull from DataSF")
+st.caption("Real-time insights from DataSF · Registered Business Locations (g8m3-pdis)")
 
 
 # -------------------- Secrets / Socrata config --------------------
 SOC_DOMAIN = st.secrets.get("socrata", {}).get("domain", "data.sfgov.org")
 DATASET_ID = st.secrets.get("socrata", {}).get("dataset_id", "g8m3-pdis")
-APP_TOKEN  = st.secrets.get("socrata", {}).get("app_token", None)
-USERNAME   = st.secrets.get("socrata", {}).get("username", None)  # optional
-PASSWORD   = st.secrets.get("socrata", {}).get("password", None)  # optional
+APP_TOKEN = st.secrets.get("socrata", {}).get("app_token", None)
+USERNAME = st.secrets.get("socrata", {}).get("username", None)
+PASSWORD = st.secrets.get("socrata", {}).get("password", None)
 
 BASE_URL = f"https://{SOC_DOMAIN}/resource/{DATASET_ID}.json"
 
@@ -54,23 +54,18 @@ AUTH = (USERNAME, PASSWORD) if (USERNAME and PASSWORD) else None
 
 # -------------------- Helper utilities --------------------
 def _dt_iso(d: date) -> str:
-    """ISO 8601 midnight timestamp string for Socrata."""
     return f"{d.isoformat()}T00:00:00.000"
 
 
 def _with_app_token(params: dict) -> dict:
-    """Also pass $$app_token in query string for broader compatibility."""
     if APP_TOKEN and "$$app_token" not in params:
         params = {**params, "$$app_token": APP_TOKEN}
     return params
 
 
 def socrata_get(params: dict, timeout=45, max_retries=3):
-    """
-    GET wrapper with retries, rate-limit backoff, diagnostics, and
-    auto-fallback when the server says 'Invalid app_token specified'.
-    """
-    global HEADERS  # we may mutate to temporarily drop token
+    """GET wrapper with retries and token fallback."""
+    global HEADERS
     params = _with_app_token(params)
     last_err = None
     used_token_this_call = "$$app_token" in params or ("X-App-Token" in HEADERS)
@@ -81,19 +76,16 @@ def socrata_get(params: dict, timeout=45, max_retries=3):
                 BASE_URL, params=params, headers=HEADERS, auth=AUTH, timeout=timeout
             )
 
-            # Rate limiting
             if resp.status_code == 429:
                 wait = 2 ** attempt
                 st.warning(f"Socrata rate limited (HTTP 429). Retrying in {wait}s …")
                 time.sleep(wait)
                 continue
 
-            # Handle invalid app_token -> one-time retry WITHOUT token
             if resp.status_code == 403 and "Invalid app_token" in (resp.text or "") and used_token_this_call:
-                st.warning("Server says app_token is invalid. Retrying without token …")
-                # temporarily drop token and retry once
+                st.warning("Invalid app_token. Retrying without token …")
                 HEADERS = {k: v for k, v in HEADERS.items() if k.lower() != "x-app-token"}
-                params.pop("$%24app_token", None)  # defensive remove URL-encoded key
+                params.pop("$%24app_token", None)
                 params.pop("$$app_token", None)
                 used_token_this_call = False
                 resp = requests.get(
@@ -101,12 +93,11 @@ def socrata_get(params: dict, timeout=45, max_retries=3):
                 )
 
             if not resp.ok:
-                snippet = (resp.text or "")[:300].replace("\n", " ")
+                snippet = (resp.text or "")[:250].replace("\n", " ")
                 st.error(f"Socrata HTTP {resp.status_code} · snippet: {snippet}")
                 resp.raise_for_status()
 
             return resp
-
         except requests.RequestException as e:
             last_err = e
             time.sleep(1.5 * attempt)
@@ -114,7 +105,6 @@ def socrata_get(params: dict, timeout=45, max_retries=3):
     raise last_err
 
 
-# === Minimal fields required for charts/KPIs; we won't $select explicitly ===
 BASIC_COLS = [
     "ttxid",
     "location_start_date",
@@ -125,16 +115,13 @@ BASIC_COLS = [
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
-    """
-    Fetch rows whose location_start_date in [start_d, end_exclusive_d).
-    No $select to avoid 'no-such-column'; we normalize columns after.
-    """
+    """Fetch rows safely, no $select to avoid column mismatch."""
     where = (
         f"location_start_date >= '{_dt_iso(start_d)}' AND "
         f"location_start_date < '{_dt_iso(end_exclusive_d)}'"
     )
 
-    # 1) Count (fast)
+    # Count first
     params_count = {"$select": "count(ttxid)", "$where": where}
     r = socrata_get(params_count, timeout=30)
     j = r.json()
@@ -142,7 +129,6 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
     if total == 0:
         return pd.DataFrame(columns=BASIC_COLS + ["start_date"])
 
-    # 2) Page through WITHOUT $select (let API send actual columns safely)
     all_rows = []
     limit = 1000
     for offset in range(0, total, limit):
@@ -159,18 +145,15 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Ensure chart fields exist
     for col in BASIC_COLS:
         if col not in df.columns:
             df[col] = np.nan
 
-    # Friendly fill
     df["naic_code_description"] = df["naic_code_description"].fillna("Unknown")
     df["neighborhoods_analysis_boundaries"] = df["neighborhoods_analysis_boundaries"].fillna(
         "Outside San Francisco"
     )
 
-    # Parse date only
     df["start_date"] = pd.to_datetime(df.get("location_start_date"), errors="coerce").dt.date
     return df
 
@@ -185,7 +168,6 @@ def counts_block(df: pd.DataFrame, today: date, sow: date, eow: date, som: date,
 
 
 def render_hbar(counts: pd.Series, title: str):
-    # Use matplotlib, single plot, do not set specific colors
     fig = plt.figure(figsize=(8, max(4, 0.3 * len(counts))))
     ax = fig.add_subplot(1, 1, 1)
     y = np.arange(len(counts))
@@ -199,18 +181,21 @@ def render_hbar(counts: pd.Series, title: str):
     return fig
 
 
-def make_pdf(period_label: str, today_c: int, week_c: int, month_c: int,
-             fig1_path: str, fig2_path: str) -> bytes:
+def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, "SF Business Registrations Report", ln=1, align="C")
     pdf.set_font("Helvetica", "", 12)
+
+    # --- sanitize unicode dashes ---
+    period_label = period_label.replace("–", "-").replace("—", "-")
+
     pdf.cell(0, 8, f"Period: {period_label}", ln=1)
     pdf.ln(2)
-    pdf.cell(0, 8, f"New Reg Businesses Today: {today_c}", ln=1)
-    pdf.cell(0, 8, f"New Reg Businesses This Week: {week_c}", ln=1)
-    pdf.cell(0, 8, f"New Reg Businesses This Month: {month_c}", ln=1)
+    pdf.cell(0, 8, f"New Businesses Today: {today_c}", ln=1)
+    pdf.cell(0, 8, f"New Businesses This Week: {week_c}", ln=1)
+    pdf.cell(0, 8, f"New Businesses This Month: {month_c}", ln=1)
     pdf.ln(4)
     pdf.set_font("Helvetica", "B", 13)
     pdf.cell(0, 8, "By Industry", ln=1)
@@ -221,14 +206,10 @@ def make_pdf(period_label: str, today_c: int, week_c: int, month_c: int,
     return pdf.output(dest="S").encode("latin-1")
 
 
-# -------------------- Date ranges (today / week / month) --------------------
+# -------------------- Date ranges --------------------
 today = date.today()
-
-# Week: Monday as start
 start_of_week = today - timedelta(days=today.weekday())
 start_of_next_week = start_of_week + timedelta(days=7)
-
-# Month
 start_of_month = today.replace(day=1)
 start_of_next_month = (
     start_of_month.replace(month=start_of_month.month % 12 + 1, day=1)
@@ -236,14 +217,12 @@ start_of_next_month = (
     else start_of_month.replace(year=start_of_month.year + 1, month=1, day=1)
 )
 
-# Fetch superset covering this week & this month once (minimizes API calls)
 earliest_needed = min(start_of_week, start_of_month)
 latest_needed = max(start_of_next_week, start_of_next_month)
 
 with st.spinner("Fetching live data from Socrata..."):
     superset_df = fetch_range(earliest_needed, latest_needed)
 
-# KPIs
 today_c, week_c, month_c = counts_block(
     superset_df, today, start_of_week, start_of_next_week, start_of_month, start_of_next_month
 )
@@ -255,14 +234,13 @@ k3.metric("New This Month", month_c)
 st.markdown("### Explore by Period, Industry, and Neighborhood")
 period_choice = st.radio("Time period", ["Today", "This Week", "This Month", "Custom"], index=0, horizontal=True)
 
-# Resolve selected range & dataframe
 if period_choice == "Today":
     df_period = superset_df[superset_df["start_date"] == today]
     period_label = today.strftime("%b %d, %Y")
 elif period_choice == "This Week":
     mask = (superset_df["start_date"] >= start_of_week) & (superset_df["start_date"] < start_of_next_week)
     df_period = superset_df[mask]
-    period_label = f"{start_of_week.strftime('%b %d')} – {(start_of_next_week - timedelta(days=1)).strftime('%b %d, %Y')}"
+    period_label = f"{start_of_week.strftime('%b %d')} - {(start_of_next_week - timedelta(days=1)).strftime('%b %d, %Y')}"
 elif period_choice == "This Month":
     mask = (superset_df["start_date"] >= start_of_month) & (superset_df["start_date"] < start_of_next_month)
     df_period = superset_df[mask]
@@ -271,12 +249,12 @@ else:
     default_start = today - timedelta(days=7)
     default_end = today
     start_d, end_d = st.date_input("Select date range", value=(default_start, default_end))
-    if isinstance(start_d, tuple):  # compatibility for older Streamlit builds
+    if isinstance(start_d, tuple):
         start_d, end_d = start_d
     end_exclusive = end_d + timedelta(days=1)
     with st.spinner("Fetching custom range..."):
         df_period = fetch_range(start_d, end_exclusive)
-    period_label = f"{start_d.strftime('%b %d, %Y')} – {end_d.strftime('%b %d, %Y')}"
+    period_label = f"{start_d.strftime('%b %d, %Y')} - {end_d.strftime('%b %d, %Y')}"
 
 if df_period.empty:
     st.info("No business registrations found for the selected period.")
@@ -291,14 +269,13 @@ st.markdown("#### New Businesses by Neighborhood")
 neigh_counts = df_period["neighborhoods_analysis_boundaries"].value_counts(ascending=True)
 fig_neigh = render_hbar(neigh_counts, f"New Businesses by Neighborhood ({period_label})")
 
-# -------------------- View Details by Industry (robust columns) --------------------
+# -------------------- View Details by Industry --------------------
 st.markdown("### View Details by Industry")
-industry_options = list(industry_counts.index[::-1])  # highest first
+industry_options = list(industry_counts.index[::-1])
 sel_industry = st.selectbox("Pick an industry to list all new registrations", options=industry_options, index=0)
-
 detail_df = df_period[df_period["naic_code_description"] == sel_industry].copy()
 
-# Helper to pick first existing column and create a unified display column
+
 def pick_col(df, candidates, new_name):
     for c in candidates:
         if c in df.columns:
@@ -306,21 +283,14 @@ def pick_col(df, candidates, new_name):
             return
     df[new_name] = np.nan
 
-# Build user-friendly columns by picking from candidates actually present
-# Dates
-pick_col(detail_df, ["location_start_date"], "Start Date")
 
-# Names / IDs
+pick_col(detail_df, ["location_start_date"], "Start Date")
 pick_col(detail_df, ["dba_name"], "DBA Name")
 pick_col(detail_df, ["ownership_name", "owner_name"], "Owner/Legal Name")
 pick_col(detail_df, ["certificate_number"], "Certificate #")
 pick_col(detail_df, ["uniqueid", "ttxid"], "Record ID")
-
-# Classification
 pick_col(detail_df, ["naics_code", "naic_code", "naics"], "NAICS Code")
 pick_col(detail_df, ["naic_code_description", "naics_description"], "NAICS Description")
-
-# Address & geo
 pick_col(detail_df, ["full_business_address", "street_address", "business_address"], "Address")
 pick_col(detail_df, ["city"], "City")
 pick_col(detail_df, ["state"], "State")
@@ -329,7 +299,6 @@ pick_col(detail_df, ["neighborhoods_analysis_boundaries"], "Neighborhood")
 pick_col(detail_df, ["business_corridor"], "Business Corridor")
 pick_col(detail_df, ["business_location"], "Business Location (Geo)")
 
-# Final display order (keep only those created)
 display_cols = [
     "Start Date",
     "DBA Name",
@@ -360,7 +329,7 @@ st.download_button(
     mime="text/csv",
 )
 
-# -------------------- Optional tables (global counts) --------------------
+# -------------------- Optional tables --------------------
 with st.expander("Show underlying count tables"):
     st.write("Industry counts")
     st.dataframe(
