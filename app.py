@@ -9,11 +9,11 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 
-# -------------------- Page config --------------------
+# -------------------- PAGE SETUP --------------------
 st.set_page_config(page_title="SF Business Registrations Dashboard", layout="wide")
 st.title("San Francisco Business Registrations Dashboard")
 
-# --- Builder credit with LinkedIn button (under title) ---
+# --- BUILDER CREDIT ---
 LINKEDIN_URL = "https://www.linkedin.com/in/lingyu-maxwell-lai"
 st.markdown(
     f"""
@@ -34,7 +34,7 @@ st.markdown(
 
 st.caption("📊 Real-time data from DataSF")
 
-# -------------------- Socrata config --------------------
+# -------------------- SOC DATA CONFIG --------------------
 SOC_DOMAIN = st.secrets.get("socrata", {}).get("domain", "data.sfgov.org")
 DATASET_ID = st.secrets.get("socrata", {}).get("dataset_id", "g8m3-pdis")
 APP_TOKEN = st.secrets.get("socrata", {}).get("app_token", None)
@@ -46,7 +46,7 @@ HEADERS = {"X-App-Token": APP_TOKEN} if APP_TOKEN else {}
 AUTH = (USERNAME, PASSWORD) if USERNAME and PASSWORD else None
 
 
-# -------------------- Helper utilities --------------------
+# -------------------- HELPERS --------------------
 def _dt_iso(d: date) -> str:
     return f"{d.isoformat()}T00:00:00.000"
 
@@ -58,7 +58,7 @@ def _with_app_token(params: dict) -> dict:
 
 
 def socrata_get(params: dict, timeout=45, max_retries=3):
-    """GET wrapper with retries and token fallback."""
+    """Retry-safe Socrata fetch."""
     global HEADERS
     params = _with_app_token(params)
     last_err = None
@@ -110,7 +110,6 @@ def fetch_range(start_d: date, end_exclusive_d: date) -> pd.DataFrame:
         f"location_start_date < '{_dt_iso(end_exclusive_d)}'"
     )
 
-    # Count first
     params_count = {"$select": "count(ttxid)", "$where": where}
     r = socrata_get(params_count, timeout=30)
     j = r.json()
@@ -171,6 +170,7 @@ def render_hbar(counts: pd.Series, title: str):
     return fig
 
 
+# --- FIXED PDF EXPORT (version-safe encoding) ---
 def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
     pdf = FPDF()
     pdf.add_page()
@@ -192,10 +192,12 @@ def make_pdf(period_label, today_c, week_c, month_c, fig1_path, fig2_path):
     pdf.ln(3)
     pdf.cell(0, 8, "By Neighborhood", ln=1)
     pdf.image(fig2_path, x=10, w=185)
-    return pdf.output(dest="S").encode("latin-1")
+
+    out = pdf.output(dest="S")
+    return out.encode("latin-1") if isinstance(out, str) else out
 
 
-# -------------------- Neighborhood Emoji Map --------------------
+# -------------------- NEIGHBORHOOD EMOJI --------------------
 NEIGHBORHOOD_EMOJI = {
     "Chinatown": "🐉",
     "Financial District/South Beach": "🏙️",
@@ -219,7 +221,7 @@ def emoji_for(name: str) -> str:
     return NEIGHBORHOOD_EMOJI.get(name, "📍")
 
 
-# -------------------- Date ranges --------------------
+# -------------------- DATE RANGE --------------------
 today = date.today()
 start_of_week = today - timedelta(days=today.weekday())
 start_of_next_week = start_of_week + timedelta(days=7)
@@ -248,7 +250,7 @@ k3.metric("🏢 New This Month", month_c)
 st.markdown("### Explore by Period, Industry, and Neighborhood")
 period_choice = st.radio("Time period", ["Today", "This Week", "This Month", "Custom"], index=0, horizontal=True)
 
-# --- Safe date input ---
+# --- Safe custom date input ---
 if period_choice == "Today":
     df_period = superset_df[superset_df["start_date"] == today]
     period_label = today.strftime("%b %d, %Y")
@@ -277,12 +279,12 @@ if df_period.empty:
     st.info("No business registrations found for the selected period.")
     st.stop()
 
-# -------------------- Industry Chart --------------------
+# -------------------- INDUSTRY CHART --------------------
 st.markdown("#### 🏭 New Businesses by Industry")
 industry_counts = df_period["naic_code_description"].value_counts(ascending=True)
 fig_industry = render_hbar(industry_counts, f"New Businesses by Industry ({period_label})")
 
-# -------------------- Neighborhood Chart + Emoji-safe Labels --------------------
+# -------------------- NEIGHBORHOOD CHART + EMOJI --------------------
 st.markdown("#### 🗺️ New Businesses by Neighborhood")
 
 df_period["neighborhood_label_table"] = df_period["neighborhoods_analysis_boundaries"].apply(
@@ -301,7 +303,7 @@ neigh_counts_table = (
 )
 st.dataframe(neigh_counts_table, use_container_width=True)
 
-# -------------------- Details by Industry --------------------
+# -------------------- DETAILS BY INDUSTRY --------------------
 st.markdown("### 🔍 View Details by Industry")
 industry_options = list(industry_counts.index[::-1])
 sel_industry = st.selectbox("Pick an industry to list all new registrations", options=industry_options, index=0)
@@ -363,7 +365,7 @@ st.download_button(
     mime="text/csv",
 )
 
-# -------------------- PDF Export --------------------
+# -------------------- PDF EXPORT --------------------
 fig_industry_path = "industry_chart.png"
 fig_neigh_path = "neighborhood_chart.png"
 fig_industry.savefig(fig_industry_path, bbox_inches="tight")
